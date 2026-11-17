@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    # Only track version tags (vX.Y.Z), not 'latest' or bare SHA tags
+    ignore:
+      - dependency-name: "ghcr.io/milind-soni/openmausbot"
+        update-types: ["version-update:semver-major"]
+    commit-message:
+      prefix: "docker"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"

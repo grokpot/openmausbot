@@ -4,7 +4,7 @@ OpenMausBot — an open-source AI bot team (Claude Code, Codex and API-key engin
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/LxzuVp)
 
-This repo packages the official [milind-soni/OpenMausBot](https://github.com/milind-soni/OpenMausBot) server image (`ghcr.io/milind-soni/openmausbot:v0.1.136`, Apache-2.0) for Railway as `ghcr.io/onepush-dev/openmausbot:0.1.136`.
+This repo packages the official [milind-soni/OpenMausBot](https://github.com/milind-soni/OpenMausBot) server image (`ghcr.io/milind-soni/openmausbot:v0.1.165`, Apache-2.0) for Railway as `ghcr.io/onepush-dev/openmausbot:0.1.165`.
 
 ## What's inside
 
@@ -45,11 +45,37 @@ More devices: **Settings → Remote access** (pairing codes) or visit `/_railway
 | `OMB_SIGNIN_MEMBER_EMAILS` | unset (optional) | allow-list for chat-only email sign-in |
 | `PORT`, `OMB_PORT`, `OMB_WEBHOOK_PORT`, `OMB_PAIR_GATE_PORT`, `OMB_DATA_DIR` | 8080, 8799, 8800, 8801, `/data/.openmausbot` (image) | internal ports and data dir |
 
+## Automated Updates
+
+This repo uses Dependabot to automatically track new releases of the upstream `ghcr.io/milind-soni/openmausbot` image. When a new version is released:
+
+1. **Dependabot** opens a PR daily (checks at 09:00 UTC) with the version bump
+2. **Build CI** (`build-pr.yml`) builds the Docker image and runs smoke tests
+3. **Auto-merge** (`auto-merge-dependabot.yml`) automatically merges patch/minor updates once the build passes
+4. **Publish** (`publish-ghcr.yml`) builds and publishes the new image to `ghcr.io/onepush-dev/openmausbot` on merge to `main`
+5. **Railway** rebuilds and redeploys your service automatically on the next push to `main`
+
+Major version updates require manual review and are not auto-merged.
+
+### Rolling Back
+
+If a version causes issues, revert to a previous version:
+
+1. Identify the commit that bumped the version (e.g., `git log --oneline Dockerfile`)
+2. Revert that commit: `git revert <commit-sha>`
+3. Push to main: `git push origin main`
+4. Railway will automatically redeploy with the previous version
+
+Or manually edit the `Dockerfile` to pin a specific version and push.
+
 ## Notes
 
 - Security: the server trusts session-less loopback callers as the owner, so ports 8799/8800 are never published. Only Caddy is public, and through it every request needs a paired session (webhooks under `/hooks/*` use their own per-hook secrets).
 - Railway has no `--shm-size`; Chrome falls back to `/tmp` for shared memory. Give the service at least 2 GB RAM if several bots browse at once.
 - Desktop-only features (dictation, controlling a host desktop, Local VMs that need Docker/KVM) don't apply on a server.
-- Update: bump the base tag in `Dockerfile`; the GitHub Action publishes a new image.
+
+## Manual Updates
+
+To manually update the base image version, edit the `FROM` line in `Dockerfile` with the new version tag and its multi-arch digest (get it from GHCR), then push to main.
 
 License: this packaging is MIT; OpenMausBot is Apache-2.0 (its `enterprise/` folder has its own license).

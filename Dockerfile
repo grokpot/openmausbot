@@ -13,12 +13,12 @@
 FROM caddy:2.10.2 AS edge
 RUN cp /usr/bin/caddy /caddy
 
-FROM ghcr.io/milind-soni/openmausbot:v0.1.136@sha256:419140ae271e85a59352175b6bdbc810b1f7c3315b931c9494f732bc13835783
+FROM ghcr.io/milind-soni/openmausbot:v0.1.165@sha256:3f6288f9b53e24f825cdd1df4c211dcc6bf9dc620c26e8e7af23b15162fa2238
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini \
  && rm -rf /var/lib/apt/lists/*
-ARG ENGINES="@anthropic-ai/claude-code@2.1.316 @openai/codex@0.166.0"
+ARG ENGINES="@anthropic-ai/claude-code@2.1.326 @openai/codex@0.169.0"
 RUN if [ -n "$ENGINES" ]; then HOME=/tmp/omb-build-home npm install -g $ENGINES && rm -rf /tmp/omb-build-home /tmp/node-compile-cache; fi
 COPY --from=edge /caddy /usr/local/bin/caddy
 COPY railway/Caddyfile /etc/omb-railway/Caddyfile

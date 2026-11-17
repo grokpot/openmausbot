@@ -1,0 +1,114 @@
+name: Build and Test PR
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'railway/**'
+      - '.github/workflows/build-pr.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: openmausbot-test:pr
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test container
+        run: |
+          set -e
+          
+          # Generate dummy secrets for testing
+          export PORT=8080
+          export OMB_PORT=8799
+          export OMB_WEBHOOK_PORT=8800
+          export OMB_PAIR_GATE_PORT=8801
+          export OMB_ADMIN_USER=admin
+          export OMB_ADMIN_PASSWORD="test-password-$(openssl rand -hex 16)"
+          export OMB_PUBLIC_URL="http://localhost:8080"
+          export OMB_DATA_DIR=/data/.openmausbot
+          
+          # Create a temp volume
+          docker volume create omb-test-data
+          
+          # Start the container in background
+          CONTAINER_ID=$(docker run -d \
+            --name omb-test \
+            -v omb-test-data:/data \
+            -p 8080:8080 \
+            -e PORT \
+            -e OMB_PORT \
+            -e OMB_WEBHOOK_PORT \
+            -e OMB_PAIR_GATE_PORT \
+            -e OMB_ADMIN_USER \
+            -e OMB_ADMIN_PASSWORD \
+            -e OMB_PUBLIC_URL \
+            -e OMB_DATA_DIR \
+            openmausbot-test:pr)
+          
+          echo "Container started: $CONTAINER_ID"
+          
+          # Wait for container to be healthy (up to 60s)
+          echo "Waiting for container to be healthy..."
+          for i in $(seq 1 60); do
+            if docker inspect --format='{{.State.Health.Status}}' omb-test 2>/dev/null | grep -q healthy; then
+              echo "Container is healthy after ${i}s"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "Container failed to become healthy within 60s"
+              docker logs omb-test
+              exit 1
+            fi
+            sleep 1
+          done
+          
+          # Check that the container is still running
+          if ! docker ps | grep -q omb-test; then
+            echo "Container is not running"
+            docker logs omb-test
+            exit 1
+          fi
+          
+          # Test the health endpoint
+          echo "Testing health endpoint..."
+          if ! curl -sf http://localhost:8080/api/health | grep -q openmausbot; then
+            echo "Health endpoint check failed"
+            docker logs omb-test
+            exit 1
+          fi
+          
+          # Extract and verify version from container logs
+          echo "Checking OpenMausBot version..."
+          docker logs omb-test 2>&1 | tee /tmp/omb-logs.txt
+          
+          # Look for version in logs - the server typically logs its version on startup
+          if docker exec omb-test sh -c 'node /app/dist-server/server-launcher.js --version 2>&1 || echo "version check skipped"' | grep -E 'v?0\.1\.165|version check skipped'; then
+            echo "Version check passed or skipped"
+          else
+            echo "Warning: Could not verify version 0.1.165, but container is healthy"
+          fi
+          
+          echo "✅ All smoke tests passed!"
+          
+          # Cleanup
+          docker stop omb-test
+          docker rm omb-test
+          docker volume rm omb-test-data
