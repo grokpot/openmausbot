@@ -1,0 +1,157 @@
+name: Auto-merge Dependabot Docker PRs
+on:
+  pull_request:
+    branches: [main]
+  workflow_run:
+    workflows: ["Build and Test PR"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    # Only run on Dependabot PRs for Docker updates
+    if: |
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.actor == 'dependabot[bot]'
+    steps:
+      - name: Get PR info
+        id: pr-info
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.workflow_run.pull_requests[0].number;
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+            
+            // Extract update type from PR title or labels
+            const title = pr.title.toLowerCase();
+            const isDocker = title.includes('docker') || 
+                            title.includes('ghcr.io/milind-soni/openmausbot') ||
+                            pr.labels.some(l => l.name === 'docker');
+            
+            // Check if it's a patch or minor update (not major)
+            const isMajor = title.includes('major') || 
+                           /from.*v?\d+\./.test(title) && /to.*v?(\d+)\./.test(title) &&
+                           parseInt(title.match(/from.*v?(\d+)\./)?.[1] || '0') !== 
+                           parseInt(title.match(/to.*v?(\d+)\./)?.[1] || '0');
+            
+            core.setOutput('pr_number', prNumber);
+            core.setOutput('is_docker', isDocker);
+            core.setOutput('is_safe', !isMajor);
+            core.setOutput('pr_url', pr.html_url);
+
+      - name: Check merge eligibility
+        if: steps.pr-info.outputs.is_docker == 'true' && steps.pr-info.outputs.is_safe == 'true'
+        run: |
+          echo "✅ PR is eligible for auto-merge"
+          echo "PR: ${{ steps.pr-info.outputs.pr_url }}"
+
+      - name: Enable auto-merge
+        if: steps.pr-info.outputs.is_docker == 'true' && steps.pr-info.outputs.is_safe == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = ${{ steps.pr-info.outputs.pr_number }};
+            
+            // Enable auto-merge with squash
+            try {
+              await github.rest.pulls.merge({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                merge_method: 'squash',
+              });
+              console.log(`✅ Successfully merged PR #${prNumber}`);
+            } catch (error) {
+              console.error(`Failed to merge PR #${prNumber}:`, error.message);
+              throw error;
+            }
+
+  direct-merge-check:
+    runs-on: ubuntu-latest
+    # Also check PRs directly when they're opened/updated
+    if: |
+      github.event_name == 'pull_request' &&
+      github.actor == 'dependabot[bot]'
+    steps:
+      - name: Wait for checks
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const title = context.payload.pull_request.title.toLowerCase();
+            
+            const isDocker = title.includes('docker') || 
+                            title.includes('ghcr.io/milind-soni/openmausbot');
+            
+            if (!isDocker) {
+              console.log('Not a Docker update, skipping');
+              return;
+            }
+            
+            // Wait for required checks to complete
+            const maxWaitMinutes = 15;
+            const checkInterval = 30000; // 30 seconds
+            const maxAttempts = (maxWaitMinutes * 60 * 1000) / checkInterval;
+            
+            for (let i = 0; i < maxAttempts; i++) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              
+              if (pr.mergeable_state === 'blocked') {
+                console.log('PR is blocked, will not auto-merge');
+                return;
+              }
+              
+              // Check if all required checks have passed
+              const { data: checks } = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: pr.head.sha,
+              });
+              
+              const allPassed = checks.check_runs
+                .filter(check => check.name !== 'Auto-merge Dependabot Docker PRs / direct-merge-check')
+                .every(check => check.status === 'completed' && check.conclusion === 'success');
+              
+              if (allPassed && pr.mergeable) {
+                console.log('All checks passed, merging PR');
+                
+                const isMajor = title.includes('major') || 
+                               /from.*v?\d+\./.test(title) && /to.*v?(\d+)\./.test(title) &&
+                               parseInt(title.match(/from.*v?(\d+)\./)?.[1] || '0') !== 
+                               parseInt(title.match(/to.*v?(\d+)\./)?.[1] || '0');
+                
+                if (!isMajor) {
+                  await github.rest.pulls.merge({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: prNumber,
+                    merge_method: 'squash',
+                  });
+                  console.log(`✅ Successfully merged PR #${prNumber}`);
+                  return;
+                } else {
+                  console.log('Major version update, skipping auto-merge');
+                  return;
+                }
+              }
+              
+              console.log(`Waiting for checks... (attempt ${i + 1}/${maxAttempts})`);
+              await new Promise(resolve => setTimeout(resolve, checkInterval));
+            }
+            
+            console.log('Timeout waiting for checks to complete');
