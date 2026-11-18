@@ -10,11 +10,31 @@
 # The server keeps binding 127.0.0.1:8799 / :8800 only; nothing reaches them
 # except through Caddy, which forwards headers so every request is "remote"
 # and needs a paired session (upstream's loopback-trust model).
+#
+# Also rebuilds the web UI from the same upstream tag with
+# patches/sidebar-attention-sort.patch (Grok-style unread sort; milind-soni/OpenMausBot#5627).
 FROM caddy:2.10.2 AS edge
 RUN cp /usr/bin/caddy /caddy
 
+FROM node:24-bookworm-slim AS patched-ui
+WORKDIR /src
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g pnpm@10.33.0
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
+ARG OMB_REF=v0.1.165
+RUN git clone --depth 1 --branch "$OMB_REF" https://github.com/milind-soni/OpenMausBot.git .
+COPY patches/sidebar-attention-sort.patch /tmp/sidebar-attention-sort.patch
+RUN git apply /tmp/sidebar-attention-sort.patch \
+ && pnpm install --frozen-lockfile \
+ && NODE_OPTIONS=--max-old-space-size=6144 pnpm exec vite build \
+ && chmod -R go-w dist
+
 FROM ghcr.io/milind-soni/openmausbot:v0.1.165@sha256:3f6288f9b53e24f825cdd1df4c211dcc6bf9dc620c26e8e7af23b15162fa2238
 USER root
+# Replace the stock web UI with the patched build (sidebar attention sort).
+COPY --from=patched-ui --chown=maus:maus /src/dist /app/dist
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini \
  && rm -rf /var/lib/apt/lists/*

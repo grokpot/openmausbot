@@ -1,0 +1,440 @@
+diff --git a/src/components/AppSettingsRows.tsx b/src/components/AppSettingsRows.tsx
+index 720e0d194..2eac24535 100644
+--- a/src/components/AppSettingsRows.tsx
++++ b/src/components/AppSettingsRows.tsx
+@@ -17,7 +17,7 @@ import { setColorUserBubbles, useColorUserBubbles } from "@/lib/user-bubble-pref
+ import { setShowThreads, useShowThreadsChoice } from "@/lib/thread-preferences";
+ import { setAdvancedMode, useAdvancedMode } from "@/lib/interface-mode";
+ import { SIMPLE_ONLY } from "@/lib/simple-only";
+-import { setPinnedCircles, setUniversalPins, usePinnedCircles, useUniversalPins } from "@/lib/sidebar-preferences";
++import { setPinnedCircles, setSidebarAttentionSort, setUniversalPins, usePinnedCircles, useSidebarAttentionSort, useUniversalPins } from "@/lib/sidebar-preferences";
+ import { setShowRunCard, useShowRunCard } from "@/lib/run-card-preferences";
+ import { parseSendKey, SEND_KEYS, sendKeyLabel, setSendKey, useSendKey } from "@/lib/send-key";
+ import { alternateSendLabel, parseFollowUpDefault, setFollowUpDefault, useFollowUpDefault } from "@/lib/follow-up";
+@@ -344,6 +344,19 @@ export function UniversalPinsRow() {
+   );
+ }
+ 
++export function SidebarAttentionSortRow() {
++  const enabled = useSidebarAttentionSort();
++  return (
++    <SettingRow title={t("settings.sidebarAttentionSort.title")} subtitle={t("settings.sidebarAttentionSort.subtitle")}>
++      <Switch
++        checked={enabled}
++        aria-label={t("settings.sidebarAttentionSort.title")}
++        onClick={() => setSidebarAttentionSort(!enabled)}
++      />
++    </SettingRow>
++  );
++}
++
+ export function ToolCallsRow() {
+   const { state, dispatch } = useStore();
+   const enabled = showToolCallsEnabled(state.config);
+diff --git a/src/components/Sidebar.departments.test.ts b/src/components/Sidebar.departments.test.ts
+index 61b9d79bf..b7da29a52 100644
+--- a/src/components/Sidebar.departments.test.ts
++++ b/src/components/Sidebar.departments.test.ts
+@@ -46,7 +46,7 @@ vi.mock("@/state/store", async (importOriginal) => {
+ 
+ import { initialState } from "@/state/store";
+ import { BOTS_SECTION_ID, CHANNELS_SECTION_ID, userSectionId } from "@/lib/sidebar-layout";
+-import { SIDEBAR_DENSITY_KEY } from "@/lib/sidebar-preferences";
++import { SIDEBAR_ATTENTION_SORT_KEY, SIDEBAR_DENSITY_KEY } from "@/lib/sidebar-preferences";
+ import { PHONE_LAYOUT } from "@/lib/use-media-query";
+ import { BotContextMenu, BotListItem, Sidebar, TeamMenuItems } from "./Sidebar";
+ const drawSidebar = (Sidebar as unknown as { type: (props: import("react").ComponentProps<typeof Sidebar>) => import("react").ReactNode }).type;
+@@ -139,6 +139,8 @@ beforeEach(() => {
+     setItem: (key: string, value: string) => { fixture.storage.set(key, value); },
+     removeItem: (key: string) => { fixture.storage.delete(key); },
+   });
++  // Keep drag/layout cases on the older working-or-waiting float; attention-sort has its own block.
++  fixture.storage.set(SIDEBAR_ATTENTION_SORT_KEY, "false");
+ });
+ afterEach(() => vi.unstubAllGlobals());
+ 
+@@ -380,6 +382,34 @@ describe("bots that are working or waiting on the person", () => {
+   });
+ });
+ 
++describe("attention sort: waiting and unread float by newest response", () => {
++  const patch = (id: string, extra: Partial<Bot>) => {
++    fixture.state = { ...fixture.state, bots: fixture.state.bots.map((item) => (item.id === id ? { ...item, ...extra } : item)) };
++  };
++
++  beforeEach(() => {
++    fixture.storage.set(SIDEBAR_ATTENTION_SORT_KEY, "true");
++  });
++
++  it("puts waiting above unread above the rest, newest first, and ignores working-only", () => {
++    patch("atlas", { unread: true, tasks: [{ threadId: "a1", title: "A", createdAt: 10, updatedAt: 40, unread: true } as Task] });
++    patch("cleo", { unread: true, tasks: [{ threadId: "c1", title: "C", createdAt: 10, updatedAt: 50, unread: true } as Task] });
++    patch("bea", { activity: "waiting-on-you", tasks: [{ threadId: "b1", title: "B", createdAt: 10, updatedAt: 20 } as Task] });
++    patch("echo", { busy: true, tasks: [{ threadId: "e1", title: "E", createdAt: 10, updatedAt: 99, busy: true } as Task] });
++    expect(listed()).toEqual(["bea", "cleo", "atlas", "dodo", "echo"]);
++  });
++
++  it("returns bots to the saved order once read, and never stores the floated order", () => {
++    patch("cleo", { unread: true, tasks: [{ threadId: "c1", title: "C", createdAt: 1, updatedAt: 30, unread: true } as Task] });
++    expect(listed()).toEqual(["cleo", "atlas", "bea", "dodo", "echo"]);
++    row("atlas").botDrag!.step("atlas", 1);
++    expect(actions()).toEqual([{ type: "botsOrdered", botIds: ["bea", "atlas", "cleo"] }]);
++    fixture.dispatch.mockClear();
++    patch("cleo", { unread: false, tasks: [{ threadId: "c1", title: "C", createdAt: 1, updatedAt: 30, unread: false } as Task] });
++    expect(listed()).toEqual(["atlas", "bea", "cleo", "dodo", "echo"]);
++  });
++});
++
+ describe("who may drag a bot: whoever the bot menu offers Move to department", () => {
+   it("gives a Team Cloud member without the admin scope no row to drag and no Alt+Up/Down, and starts no drag", () => {
+     const drawnEarlier = row("atlas").botDrag!;
+diff --git a/src/components/Sidebar.tsx b/src/components/Sidebar.tsx
+index a7f46890a..a0eb9db92 100644
+--- a/src/components/Sidebar.tsx
++++ b/src/components/Sidebar.tsx
+@@ -41,7 +41,8 @@ import { useOwnerOrAdmin } from "@/lib/use-owner-or-admin";
+ import { draggedFolder, FOLDER_DRAG_TYPE, moveFolder, placeFolder } from "@/lib/folder-order";
+ import { folderUnreadThreadIds, markFolderRead } from "@/lib/folder-read";
+ import { HelperThreadGroup, orderedThreadList, partitionHelperThreads, SidebarThreadRow, stampClock, threadRecency, threadRowActions, useRelativeNow, useRevealedThreadRow, useSnoozeExpiry, visibleSidebarThreads } from "./SidebarThreadRow";
+-import { setSidebarDensity, useSidebarDensity, usePinnedCircles, useSidebarShowAllThreads, useUniversalPins, type SidebarDensity } from "@/lib/sidebar-preferences";
++import { setSidebarDensity, useSidebarDensity, usePinnedCircles, useSidebarShowAllThreads, useSidebarAttentionSort, useUniversalPins, type SidebarDensity } from "@/lib/sidebar-preferences";
++import { botShowsUnread, openAsksOf } from "@/lib/bot-unread";
+ import {
+   ATTENTION_SECTION_ID,
+   BOT_CHATS_SECTION_ID,
+@@ -51,6 +52,8 @@ import {
+   PINNED_THREADS_SECTION_ID,
+   TOOLS_SECTION_ID,
+   activeBotsFirst,
++  attentionBotsFirst,
++  botSidebarRecency,
+   partitionSidebarBots,
+   partitionSidebarGroups,
+   pinnedCircleThreadListVisible,
+@@ -994,6 +997,7 @@ export const Sidebar = memo(function Sidebar({ open, onClose, collapseToIcons =
+   const closeSearch = () => { setSearchOpen(false); setQuery(""); searchToggleRef.current?.focus(); };
+   const pinnedCircles = usePinnedCircles();
+   const universalPins = useUniversalPins();
++  const attentionSort = useSidebarAttentionSort();
+   const [pinnedCircleThreadsCollapsed, setPinnedCircleThreadsCollapsed] = useState(true);
+ 
+   useEffect(() => {
+@@ -1098,10 +1102,23 @@ export const Sidebar = memo(function Sidebar({ open, onClose, collapseToIcons =
+   const parts = partitionSidebarBots(botDrag.preview(matchingBots), { universalPins, viewerEmail, welcoming: useWelcomingBot(), searching: Boolean(q) });
+   const saved = simpleDesk ? withPrimaryTile(parts, myDefaultBot(state.bots, viewerEmail)?.id) : { ...parts, primary: null };
+   // Shown order only: drag and Alt+Up/Down keep working on the saved order, so a reorder never stores this one.
+-  const { primary, unsectionedChief, pinnedBots, sectionChiefs, sectionedBots, unsectionedBots } = { ...saved, ...activeBotsFirst(saved, (bot) => {
+-    const { waiting, working } = sidebarBotStatus(bot, state.pendingQueued);
+-    return waiting || working;
+-  }) };
++  const shownOrder = attentionSort
++    ? attentionBotsFirst(
++      saved,
++      (bot) => {
++        const { waiting } = sidebarBotStatus(bot, state.pendingQueued);
++        if (waiting || openAsksOf(bot) > 0) return 0;
++        if (botShowsUnread(bot)) return 1;
++        return 2;
++      },
++      botSidebarRecency,
++      { reorderPinned: false },
++    )
++    : activeBotsFirst(saved, (bot) => {
++      const { waiting, working } = sidebarBotStatus(bot, state.pendingQueued);
++      return waiting || working;
++    });
++  const { primary, unsectionedChief, pinnedBots, sectionChiefs, sectionedBots, unsectionedBots } = { ...saved, ...shownOrder };
+   const { botChats, sectionedRooms, unsectionedRooms } = partitionSidebarGroups(visibleGroups);
+ 
+   const sectionNames: string[] = [...(state.sections ?? []).filter((name) => !q || name.toLowerCase().includes(q.toLowerCase())), ...botDrag.pending];
+@@ -1317,7 +1334,7 @@ export const Sidebar = memo(function Sidebar({ open, onClose, collapseToIcons =
+           />
+         </div>
+       </div>}
+-      {!q && <TeamSideSwitch compact={density === "icons"} listOnly={phone} />}{!q && <SidebarInboxRow icons={density === "icons"} large={!advanced} running={attentionHasRunningWork(attention)} onOpened={phone ? onClose : undefined} />}
++      {!q && <TeamSideSwitch compact={density === "icons"} listOnly={phone} />}{!q && !attentionSort && <SidebarInboxRow icons={density === "icons"} large={!advanced} running={attentionHasRunningWork(attention)} onOpened={phone ? onClose : undefined} />}
+       {universalPins && pinnedBots.length > 0 && !simpleDesk && (
+         <div
+           data-sidebar-universal-pins=""
+diff --git a/src/components/settings/pages/AppPages.tsx b/src/components/settings/pages/AppPages.tsx
+index 74caf86dd..f0c353b2f 100644
+--- a/src/components/settings/pages/AppPages.tsx
++++ b/src/components/settings/pages/AppPages.tsx
+@@ -9,7 +9,7 @@ import { AnalyticsRow } from "../../AnalyticsRow";
+ import { ChatWidthRow, FontRow, SidebarToolsLayoutRow } from "../../AppearanceSelectRows";
+ import {
+   ColorUserBubblesRow, FollowUpRow, LanguageRow, PinnedCirclesRow, ReplayTourRow, RunCardRow, SendKeyRow, ShowThreadsRow,
+-  ToolCallsRow, UniversalPinsRow, UpdatesRow,
++  SidebarAttentionSortRow, ToolCallsRow, UniversalPinsRow, UpdatesRow,
+ } from "../../AppSettingsRows";
+ import { ChromeRailRow } from "../../ChromeRailToggle";
+ import { ConnectedWorkspacesSettings } from "../../ConnectedWorkspacesSettings";
+@@ -171,6 +171,7 @@ export function AppearancePage() {
+         {ctx.advanced && <RunCardRow />}
+         {ctx.advanced && <ChatWidthRow />}
+         {ctx.advanced && <FontRow />}
++        <SidebarAttentionSortRow />
+       </SettingsRows>
+     </SettingsGroup>
+     {/* Simple keeps the Look card and Tool calls; the window's layout is Advanced. */}
+diff --git a/src/components/settings/settings-index.ts b/src/components/settings/settings-index.ts
+index 03e7b9dbe..548b14865 100644
+--- a/src/components/settings/settings-index.ts
++++ b/src/components/settings/settings-index.ts
+@@ -242,6 +242,7 @@ export const SETTINGS_INDEX: readonly SettingsIndexEntry[] = [
+   { id: "bubbles", page: "appearance", anchor: "look", labelKey: "settings.userBubbles.simpleTitle", synonyms: ["message color", "my messages", "bubbles"] },
+   { id: "tool-calls", page: "appearance", anchor: "chat", labelKey: "settings.appearance.chat", synonyms: ["tool calls", "this run", "chat width", "font", "typeface"] },
+   { id: "layout", page: "appearance", anchor: "appearance", labelKey: "settings.appearance.layout", advanced: true, synonyms: ["show your computers", "rail", "window frame", "title bar", "threads", "tools layout", "pinned", "circles", "universal pins", "pinned panels"] },
++  { id: "attention-sort", page: "appearance", anchor: "chat", labelKey: "settings.sidebarAttentionSort.title", sectionKey: "settings.appearance.chat", synonyms: ["unread", "waiting", "needs you", "inbox", "sort bots", "bring to top", "grok"] },
+   { id: "apps", page: "overview", labelKey: "settings.search.apps", jump: "apps", synonyms: ["apps", "gmail", "slack", "calendar", "notion", "connect app", "integrations"] },
+   { id: "bot-settings", page: "overview", labelKey: "settings.search.bot", jump: "bot", synonyms: ["approvals", "safety", "routines", "memory", "bot's notifications"] },
+   { id: "shortcuts", page: "app", labelKey: "sidebar.menu.shortcuts", jump: "shortcuts", synonyms: ["keyboard shortcuts", "hotkeys", "cheat sheet"] },
+diff --git a/src/lib/sidebar-layout.test.ts b/src/lib/sidebar-layout.test.ts
+index d193c9492..dea0ed8f5 100644
+--- a/src/lib/sidebar-layout.test.ts
++++ b/src/lib/sidebar-layout.test.ts
+@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
+ 
+ import {
+   activeBotsFirst,
++  attentionBotsFirst,
++  botSidebarRecency,
+   BOT_CHATS_SECTION_ID,
+   BOTS_SECTION_ID,
+   CHANNELS_SECTION_ID,
+@@ -334,3 +336,30 @@ describe("active bots first", () => {
+     expect(parts.sectionedBots).toEqual(["w1", "h1", "w2"]);
+   });
+ });
++
++describe("attention bots first", () => {
++  const bot = (id: string, tasks: Array<{ updatedAt?: number; createdAt?: number; routineRunId?: string; archivedAt?: number }> = []) => ({ id, tasks });
++
++  it("orders waiting, then unread (newest first), then the rest in saved order, and leaves pins alone", () => {
++    const parts = {
++      pinnedBots: [bot("pin-old", [{ updatedAt: 1 }]), bot("pin-new", [{ updatedAt: 99 }])],
++      sectionedBots: [bot("w-unread", [{ updatedAt: 30 }]), bot("w-wait", [{ updatedAt: 10 }]), bot("w-idle", [{ updatedAt: 80 }])],
++      unsectionedBots: [bot("a", [{ updatedAt: 5 }]), bot("b", [{ updatedAt: 50 }]), bot("c", [{ updatedAt: 40 }])],
++    };
++    const rank = (item: { id: string }) => (item.id.includes("wait") ? 0 : item.id.includes("unread") || item.id === "b" || item.id === "c" ? 1 : 2);
++    expect(attentionBotsFirst(parts, rank, botSidebarRecency, { reorderPinned: false })).toEqual({
++      pinnedBots: parts.pinnedBots,
++      sectionedBots: [bot("w-wait", [{ updatedAt: 10 }]), bot("w-unread", [{ updatedAt: 30 }]), bot("w-idle", [{ updatedAt: 80 }])],
++      unsectionedBots: [bot("b", [{ updatedAt: 50 }]), bot("c", [{ updatedAt: 40 }]), bot("a", [{ updatedAt: 5 }])],
++    });
++  });
++
++  it("ignores routine runs and archived threads when scoring recency", () => {
++    expect(botSidebarRecency(bot("x", [
++      { updatedAt: 100, routineRunId: "run" },
++      { updatedAt: 90, archivedAt: 1 },
++      { updatedAt: 20 },
++      { createdAt: 15 },
++    ]))).toBe(20);
++  });
++});
+diff --git a/src/lib/sidebar-layout.ts b/src/lib/sidebar-layout.ts
+index e49caee9b..90976d3e3 100644
+--- a/src/lib/sidebar-layout.ts
++++ b/src/lib/sidebar-layout.ts
+@@ -151,6 +151,50 @@ export function activeBotsFirst<T>(parts: { pinnedBots: T[]; sectionedBots: T[];
+   return { pinnedBots: first(parts.pinnedBots), sectionedBots: first(parts.sectionedBots), unsectionedBots: first(parts.unsectionedBots) };
+ }
+ 
++/** Newest activity on a bot's live conversations (not routine runs or archived threads). */
++export function botSidebarRecency(bot: {
++  tasks?: ReadonlyArray<{ updatedAt?: number; createdAt?: number; routineRunId?: string; archivedAt?: number }> | null;
++}): number {
++  let newest = 0;
++  for (const task of bot.tasks ?? []) {
++    if (task.routineRunId || task.archivedAt !== undefined) continue;
++    const at = typeof task.updatedAt === "number" && Number.isFinite(task.updatedAt)
++      ? task.updatedAt
++      : typeof task.createdAt === "number" && Number.isFinite(task.createdAt)
++        ? task.createdAt
++        : 0;
++    if (at > newest) newest = at;
++  }
++  return newest;
++}
++
++/**
++ * Grok-style sidebar order inside each list (main bots, each department): waiting-on-you, then unread,
++ * then the rest. Waiting and unread groups are newest-first; everyone else keeps the person's saved
++ * order so a read bot drops back into place. Pinned rows keep their pin order unless `reorderPinned`.
++ */
++export function attentionBotsFirst<T>(
++  parts: { pinnedBots: T[]; sectionedBots: T[]; unsectionedBots: T[] },
++  rank: (bot: T) => number,
++  recency: (bot: T) => number,
++  options?: { reorderPinned?: boolean },
++) {
++  const sortList = (bots: T[]) => bots
++    .map((bot, index) => ({ bot, index, tier: rank(bot), at: recency(bot) }))
++    .sort((left, right) => {
++      if (left.tier !== right.tier) return left.tier - right.tier;
++      // Newest first only while the bot still needs attention; the quiet list keeps saved order.
++      if (left.tier < 2 && right.tier < 2 && left.at !== right.at) return right.at - left.at;
++      return left.index - right.index;
++    })
++    .map((entry) => entry.bot);
++  return {
++    pinnedBots: options?.reorderPinned ? sortList(parts.pinnedBots) : parts.pinnedBots,
++    sectionedBots: sortList(parts.sectionedBots),
++    unsectionedBots: sortList(parts.unsectionedBots),
++  };
++}
++
+ export function partitionSidebarGroups<T extends SidebarGroup>(groups: T[]) {
+   const botChats = groups.filter((group) => Boolean(group.dm));
+   const rooms = groups.filter((group) => !group.dm);
+diff --git a/src/lib/sidebar-preferences.test.ts b/src/lib/sidebar-preferences.test.ts
+index 442c92656..a2499ed20 100644
+--- a/src/lib/sidebar-preferences.test.ts
++++ b/src/lib/sidebar-preferences.test.ts
+@@ -6,6 +6,7 @@ import {
+   PINNED_CIRCLES_KEY,
+   PINNED_CIRCLE_ORDER_KEY,
+   SIDEBAR_ATTENTION_PINNED_KEY,
++  SIDEBAR_ATTENTION_SORT_KEY,
+   UNIVERSAL_PINS_KEY,
+   SIDEBAR_COLLAPSED_SECTIONS_KEY,
+   SIDEBAR_DENSITY_KEY,
+@@ -18,6 +19,9 @@ import {
+   loadPinnedCircleOrder,
+   loadUniversalPins,
+   loadSidebarAttentionPinned,
++  loadSidebarAttentionSort,
++  parseSidebarAttentionSort,
++  saveSidebarAttentionSort,
+   loadCollapsedSections,
+   loadSectionOrder,
+   loadSidebarDensity,
+@@ -235,6 +239,24 @@ describe("sidebar attention pin preference", () => {
+   });
+ });
+ 
++describe("sidebar attention sort preference", () => {
++  it("defaults on, and only an explicit false turns it off", () => {
++    expect(parseSidebarAttentionSort(null)).toBe(true);
++    expect(parseSidebarAttentionSort("true")).toBe(true);
++    expect(parseSidebarAttentionSort("false")).toBe(false);
++    expect(parseSidebarAttentionSort("no")).toBe(true);
++
++    const setItem = vi.fn();
++    saveSidebarAttentionSort(true, { setItem });
++    saveSidebarAttentionSort(false, { setItem });
++    expect(setItem).toHaveBeenNthCalledWith(1, SIDEBAR_ATTENTION_SORT_KEY, "true");
++    expect(setItem).toHaveBeenNthCalledWith(2, SIDEBAR_ATTENTION_SORT_KEY, "false");
++    expect(loadSidebarAttentionSort({ getItem: () => null })).toBe(true);
++    expect(loadSidebarAttentionSort({ getItem: () => "false" })).toBe(false);
++    expect(loadSidebarAttentionSort({ getItem: () => { throw new Error("blocked"); } })).toBe(true);
++  });
++});
++
+ describe("sidebar tools layout preference", () => {
+   it("tools layout defaults to rows and ignores malformed values", () => {
+     expect(parseSidebarToolsLayout("rows")).toBe("rows");
+diff --git a/src/lib/sidebar-preferences.ts b/src/lib/sidebar-preferences.ts
+index f9a764ba0..5c682a8f2 100644
+--- a/src/lib/sidebar-preferences.ts
++++ b/src/lib/sidebar-preferences.ts
+@@ -18,6 +18,8 @@ export const SIMPLE_SIDEBAR_SECTION_ORDER_KEY = "openmausbot.sidebarSectionOrder
+ export const PINNED_CIRCLES_KEY = "openmausbot.pinnedCircles";
+ export const UNIVERSAL_PINS_KEY = "openmausbot.universalPins";
+ export const PINNED_CIRCLE_ORDER_KEY = "openmausbot.pinnedCircleOrder.v1";
++/** When on (default): bots waiting on you / with unread float to the top by newest response; Inbox row stays hidden. */
++export const SIDEBAR_ATTENTION_SORT_KEY = "openmausbot.sidebarAttentionSort.v1";
+ 
+ /** What the sidebar's key keeps for the column of avatars. The values an older app kept there ("compact", "icons") open
+  * the sidebar as it is. */
+@@ -379,6 +381,76 @@ export function useUniversalPins(): boolean {
+   return useSyncExternalStore(subscribeUniversalPins, loadUniversalPins, () => false);
+ }
+ 
++export function parseSidebarAttentionSort(value: string | null): boolean {
++  // Absent means on: Grok-style discovery is the default. Only an explicit "false" turns it off.
++  return value !== "false";
++}
++
++let sessionSidebarAttentionSort: boolean | undefined;
++const sidebarAttentionSortListeners = new Set<() => void>();
++
++function notifySidebarAttentionSort(): void {
++  for (const listener of sidebarAttentionSortListeners) listener();
++}
++
++function onSidebarAttentionSortStorage(event: StorageEvent): void {
++  if (event.key !== SIDEBAR_ATTENTION_SORT_KEY && event.key !== null) return;
++  sessionSidebarAttentionSort = undefined;
++  notifySidebarAttentionSort();
++}
++
++export function subscribeSidebarAttentionSort(listener: () => void): () => void {
++  sidebarAttentionSortListeners.add(listener);
++  if (
++    sidebarAttentionSortListeners.size === 1 &&
++    typeof window !== "undefined" &&
++    typeof window.addEventListener === "function"
++  ) {
++    window.addEventListener("storage", onSidebarAttentionSortStorage);
++  }
++  return () => {
++    sidebarAttentionSortListeners.delete(listener);
++    if (
++      sidebarAttentionSortListeners.size === 0 &&
++      typeof window !== "undefined" &&
++      typeof window.removeEventListener === "function"
++    ) {
++      window.removeEventListener("storage", onSidebarAttentionSortStorage);
++    }
++  };
++}
++
++export function loadSidebarAttentionSort(storage?: Pick<Storage, "getItem"> | null): boolean {
++  if (storage === undefined && sessionSidebarAttentionSort !== undefined) return sessionSidebarAttentionSort;
++  try {
++    const target = storage === undefined ? (globalThis.localStorage ?? null) : storage;
++    return parseSidebarAttentionSort(target?.getItem(SIDEBAR_ATTENTION_SORT_KEY) ?? null);
++  } catch {
++    return true;
++  }
++}
++
++export function saveSidebarAttentionSort(
++  enabled: boolean,
++  storage?: Pick<Storage, "setItem"> | null,
++): void {
++  try {
++    const target = storage === undefined ? (globalThis.localStorage ?? null) : storage;
++    target?.setItem(SIDEBAR_ATTENTION_SORT_KEY, enabled ? "true" : "false");
++  } catch {
++  }
++}
++
++export function setSidebarAttentionSort(enabled: boolean): void {
++  sessionSidebarAttentionSort = enabled;
++  saveSidebarAttentionSort(enabled);
++  notifySidebarAttentionSort();
++}
++
++export function useSidebarAttentionSort(): boolean {
++  return useSyncExternalStore(subscribeSidebarAttentionSort, loadSidebarAttentionSort, () => true);
++}
++
+ 
+ const stringListSchema = z.array(z.string().min(1).max(240));
+ 
+diff --git a/src/locales/en.json b/src/locales/en.json
+index 7e4f7c6bf..27fbd9da3 100644
+--- a/src/locales/en.json
++++ b/src/locales/en.json
+@@ -1930,6 +1930,8 @@
+   "settings.pinnedCircles.subtitle": "Show pinned bots as large avatars, like Grok Bot. Widening the sidebar fits more on each row.",
+   "settings.universalPins.title": "Universal pins",
+   "settings.universalPins.subtitle": "Keep pinned bots from every group at the top of the sidebar, including a group's chief. They stay there while the rest of the list scrolls.",
++  "settings.sidebarAttentionSort.title": "Bring bots that need you to the top",
++  "settings.sidebarAttentionSort.subtitle": "Float bots waiting on you or with unread replies to the top of the sidebar, newest first, with a marker on the row. Turn this off to keep a fixed order and show the Inbox row again.",
+   "settings.notificationSounds.title": "Notification sounds",
+   "settings.notificationSounds.subtitle": "Play this computer's alert sound when an agent finishes or needs you. Turn it off to keep the banners but lose the chime (handy on a call, where the agent is already talking to you).",
+   "settings.notificationSounds.play": "Notification sounds",
