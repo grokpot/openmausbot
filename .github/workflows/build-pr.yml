@@ -5,6 +5,7 @@ on:
     paths:
       - 'Dockerfile'
       - 'railway/**'
+      - 'patches/**'
       - '.github/workflows/build-pr.yml'
 
 permissions:

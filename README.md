@@ -6,6 +6,12 @@ OpenMausBot — an open-source AI bot team (Claude Code, Codex and API-key engin
 
 This repo packages the official [milind-soni/OpenMausBot](https://github.com/milind-soni/OpenMausBot) server image (`ghcr.io/milind-soni/openmausbot:v0.1.165`, Apache-2.0) for Railway as `ghcr.io/onepush-dev/openmausbot:0.1.165`.
 
+## UI patches
+
+This image rebuilds OpenMausBot's web UI from the pinned upstream tag with:
+
+- `patches/sidebar-attention-sort.patch` — Grok-style sidebar: bots waiting on you or with unread replies float to the top (newest first) with a row marker; the Inbox discovery row is hidden while that sort is on ([milind-soni/OpenMausBot#5627](https://github.com/milind-soni/OpenMausBot/issues/5627)). Opt out in **Settings → Appearance → Bring bots that need you to the top**.
+
 ## What's inside
 
 Upstream's `compose.yaml` runs two containers in one network namespace: the `omb` server and a Caddy edge. Railway services can't share a network namespace, so this image runs both in one service:
